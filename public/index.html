@@ -1238,7 +1238,45 @@ function loop(now){requestAnimationFrame(loop);const dt=Math.min((now-last)/1000
 const PQ=id=>document.getElementById(id),tmpV=V(0,0,0),tq=new T.Quaternion();
 const blueM=bodyM.clone();blueM.color.setHex(0x1e6cff);
 const NET={on:false,role:null,id:null,ws:null,code:null,host:null,plist:[],bots:{},len:120,map:0,snap:null,snapAt:0,applied:-1,seq:0,sendT:0,inKey:'',inT:0,screen:'choice',started:false};
-NET.rtt=0;NET.pgI=0;
+NET.rtt=0;NET.pgI=0;NET.drtt=0;NET.dpI=0;NET.peers={};
+// ---- direct peer-to-peer link (WebRTC); the server only introduces players and stays as the fallback ----
+const RTC_CFG={iceServers:[{urls:['stun:stun.l.google.com:19302','stun:stun.cloudflare.com:3478']}]};
+const chOpen=c=>!!c&&c.readyState=='open';
+function netDirect(){const pe=NET.peers[NET.host];return !!(pe&&chOpen(pe.dc))}
+function netCloseRtc(){clearInterval(NET.dpI);for(const k in NET.peers){const pe=NET.peers[k];try{if(pe.dc)pe.dc.close();if(pe.rc)pe.rc.close();if(pe.pc)pe.pc.close()}catch(e){}}NET.peers={};NET.drtt=0}
+function netPeer(id){
+ let pe=NET.peers[id];if(pe)return pe;
+ pe=NET.peers[id]={id:id,pc:null,dc:null,rc:null,q:[],rd:false};
+ let pc;try{pc=new RTCPeerConnection(RTC_CFG)}catch(e){return pe}
+ pe.pc=pc;
+ pc.onicecandidate=ev=>{if(ev.candidate)netSend({t:'sig',to:id,d:{c:ev.candidate}})};
+ pc.ondatachannel=ev=>netChan(pe,ev.channel);
+ return pe}
+function netChan(pe,ch){
+ if(ch.label=='g'){pe.dc=ch;
+  if(NET.role!='host')ch.onopen=()=>{clearInterval(NET.dpI);NET.dpI=setInterval(()=>{if(chOpen(ch))try{ch.send(JSON.stringify({t:'dpg',c:performance.now()}))}catch(e){}},500)}}
+ else pe.rc=ch;
+ ch.onmessage=ev=>netRtcMsg(pe,ev.data)}
+function netRtcMsg(pe,d){let m;try{m=JSON.parse(d)}catch(e){return}
+ if(NET.role=='host'){if(m.t=='in')netIn({id:pe.id,i:m.i});else if(m.t=='dpg'&&chOpen(pe.dc))try{pe.dc.send(d)}catch(e){}}
+ else if(m.t=='dpg'){const r=(performance.now()-m.c)/1000;NET.drtt=NET.drtt?NET.drtt*.7+r*.3:r}
+ else netMsg(m)}
+function netSig(m){
+ if(!m.d)return;const pe=netPeer(m.from),pc=pe.pc;if(!pc)return;const d=m.d;
+ if(d.s){pc.setRemoteDescription(d.s).then(()=>{pe.rd=true;for(const c of pe.q)pc.addIceCandidate(c).catch(()=>{});pe.q=[];
+   if(d.s.type=='offer')return pc.createAnswer().then(a=>pc.setLocalDescription(a)).then(()=>netSend({t:'sig',to:m.from,d:{s:pc.localDescription}}))}).catch(()=>{})}
+ else if(d.c){if(pe.rd)pc.addIceCandidate(d.c).catch(()=>{});else pe.q.push(d.c)}}
+function netRtcStart(){
+ if(NET.role!='host'||typeof RTCPeerConnection=='undefined')return;
+ for(const pl of NET.plist){if(pl.id===NET.id)continue;const pe=netPeer(pl.id),pc=pe.pc;if(!pc)continue;
+  netChan(pe,pc.createDataChannel('g',{ordered:false,maxRetransmits:0}));netChan(pe,pc.createDataChannel('r'));
+  pc.createOffer().then(o=>pc.setLocalDescription(o)).then(()=>netSend({t:'sig',to:pl.id,d:{s:pc.localDescription}})).catch(()=>{})}}
+function netSnapOut(S){
+ const need=[];let str=null;
+ for(const pl of NET.plist){if(pl.id===NET.id)continue;const pe=NET.peers[pl.id];
+  if(pe&&chOpen(pe.dc)){if(pe.dc.bufferedAmount>16384)continue;if(!str)str=JSON.stringify(S);try{pe.dc.send(str)}catch(e){need.push(pl.id)}}else need.push(pl.id)}
+ if(need.length){S.o=need;netSend(S)}}
+function netInputOut(o){const pe=NET.peers[NET.host];if(pe&&chOpen(pe.dc)){try{pe.dc.send(JSON.stringify(o));return}catch(e){}}netSend(o)}
 const LENS=[120,180,300];
 // ---- lag hiding: client-side prediction of your own car, reconciled against the host's authoritative state ----
 function netPredict(dt){
@@ -1247,7 +1285,7 @@ function netPredict(dt){
 }
 function netRecon(e,age,dt,wasDead){
  // the host's state is old by: time since it arrived + our ping + the host's ping, so extrapolate it forward by that much
- const lead=Math.min(.5,age+NET.rtt+(NET.snap.rh||0));
+ const lead=Math.min(.5,age+(netDirect()?NET.drtt:NET.rtt+(NET.snap.rh||0)));
  tmpV.set(e[1]+e[8]*lead,e[2]+e[9]*lead,e[3]+e[10]*lead);tq.set(e[4],e[5],e[6],e[7]);
  const hard=wasDead||PH.dead>0||cdT>0||phase==2||matchEnd||p.distanceToSquared(tmpV)>64;
  if(hard){p.copy(tmpV);q.copy(tq);v.set(e[8],e[9],e[10]);w.set(0,0,0);dodgeW.set(0,0,0);jumpT=0;dodgeT=0;ceilT=0;restT=0;airT=0;jcool=0;dodged=false;selfFlip=false;isBoost=!!(e[11]&1);isAir=!!(e[11]&2);boost=e[12]}
@@ -1258,12 +1296,16 @@ function netRecon(e,age,dt,wasDead){
  }
 }
 function netSend(o){if(NET.ws&&NET.ws.readyState==1)NET.ws.send(JSON.stringify(o))}
-function netEv(e,to){if(NET.role=='host')netSend({t:'ev',e:e,to:to})}
+function netEv(e,to){if(NET.role!='host')return;
+ const need=[];let str=null;
+ for(const pl of NET.plist){if(pl.id===NET.id||(to&&pl.id!==to))continue;const pe=NET.peers[pl.id];
+  if(pe&&chOpen(pe.rc)){if(!str)str=JSON.stringify({t:'ev',e:e});try{pe.rc.send(str)}catch(x){need.push(pl.id)}}else need.push(pl.id)}
+ if(need.length)netSend({t:'ev',e:e,to:to,o:need})}
 function privMsg(s){PQ('pMsg').textContent=s||''}
 function privScreen(s){NET.screen=s;PQ('priv').dataset.s=s;privMsg('');if(s=='join')setTimeout(()=>PQ('pCode').focus(),50);PQ('pBack').textContent=s=='choice'?'BACK':s=='join'?'BACK':'LEAVE MATCH'}
 function openPriv(){menuMode='priv';tEl.classList.remove('pm');tEl.classList.add('vm');privScreen('choice')}
 function closePriv(){menuMode='play';tEl.classList.remove('vm');tEl.classList.add('pm')}
-function netLeave(){const w=NET.ws;NET.ws=null;if(w){try{w.send(JSON.stringify({t:'leave'}))}catch(e){}try{w.close()}catch(e){}}NET.code=null;NET.plist=[]}
+function netLeave(){netCloseRtc();const w=NET.ws;NET.ws=null;if(w){try{w.send(JSON.stringify({t:'leave'}))}catch(e){}try{w.close()}catch(e){}}NET.code=null;NET.plist=[]}
 function privBack(){sfx('back');if(NET.screen=='lobby'){netLeave();privScreen('choice')}else if(NET.screen=='join')privScreen('choice');else closePriv()}
 function netConnect(then){
  if(NET.ws&&NET.ws.readyState==1){then();return}
@@ -1302,9 +1344,10 @@ function netMsg(m){switch(m.t){
  case 'err':privMsg(m.msg);break;
  case 'start':if(!NET.started)netStart(m);break;
  case 'in':if(NET.role=='host')netIn(m);break;
- case 'snap':NET.snap=m;NET.snapAt=performance.now();break;
+ case 'sig':netSig(m);break;
+ case 'snap':if(!NET.snap||m.n>NET.snap.n||m.n<NET.snap.n-100){NET.snap=m;NET.snapAt=performance.now()}break;
  case 'ev':netEvs(m.e);break;
- case 'closed':NET.ws=null;if(NET.started)netLost('THE HOST LEFT THE MATCH');else{privMsg('The host closed the match.');privScreen('choice')}break;
+ case 'closed':netCloseRtc();NET.ws=null;if(NET.started)netLost('THE HOST LEFT THE MATCH');else{privMsg('The host closed the match.');privScreen('choice')}break;
 }}
 // ---- menu wiring ----
 PQ('pBack').onclick=privBack;
@@ -1321,7 +1364,7 @@ document.querySelectorAll('#pLobby .pa').forEach(b=>b.onclick=()=>{if(NET.id!==N
 PQ('pCodeShow').onclick=()=>{try{navigator.clipboard.writeText(NET.code||'');privMsg('Code copied!')}catch(e){}};
 // ---- starting a match ----
 function netStart(m){
- NET.started=true;NET.id=m.you;NET.host=m.host;NET.plist=m.players;NET.len=m.len;NET.role=NET.id===NET.host?'host':'client';NET.on=true;
+ netCloseRtc();NET.started=true;NET.id=m.you;NET.host=m.host;NET.plist=m.players;NET.len=m.len;NET.role=NET.id===NET.host?'host':'client';NET.on=true;
  const me=m.players.find(x=>x.id===NET.id);MT=me?me.team:0;PH.t=MT;
  if(mapI!=m.map)applyMap(m.map);
  if(MT==1)bodyM.color.setHex(0xff7a1a);
@@ -1329,7 +1372,7 @@ function netStart(m){
  freePlay=false;matchOn=true;score[0]=score[1]=0;mTime=NET.len;ot=false;otT=0;matchEnd=false;tUp=0;
  repEl.querySelector('small').textContent='';
  const rb=PQ('eR');if(NET.role!='host'){rb.textContent='WAITING FOR HOST';rb.style.opacity=.5;rb.style.pointerEvents='none'}
- netMkBots();beginPlay();
+ netMkBots();beginPlay();netRtcStart();
 }
 const AIDEF=()=>({rt:0,tx:0,ty:0,tz:0,kx:0,ky:0,kz:0,act:null,at:0,fs:0,cd:0,stk:0,mode:'atk',aer:false,ta:0,fl:false,bo:false,mis:0,fr:0});
 function mkNetBot(pl){const t=pl.team,m=car.clone(true),fl=[];
@@ -1358,7 +1401,7 @@ function netHostSend(dt){
  const S={t:'snap',n:++NET.seq,rh:Math.round(NET.rtt*1000)/1000,pl:pl,b:[r(b.x,100),r(b.y,100),r(b.z,100),r(bv.x,10),r(bv.y,10),r(bv.z,10),r(bq.x,1e4),r(bq.y,1e4),r(bq.z,1e4),r(bq.w,1e4)],bv:ballM.visible?1:0,sc:[score[0],score[1]],mt:r(mTime,10),ot:ot?1:0,oo:r(otT,10),ph:phase,gT:r(goalT,100),gt:goalTeam,cd:r(cdT,100),me:matchEnd?1:0,pd:pads.map(a=>a.t>0?0:1).join('')};
  if(goalInfo)S.gi=[goalInfo.team,goalInfo.st?goalInfo.st.nid:null,goalInfo.as?goalInfo.as.nid:null];
  if(NET.seq%12==0||(matchEnd&&NET.seq%6==0))S.ss=allSt().map(s=>[s.nid,s.score,s.goals,s.assists,s.saves,s.shots,s.demos,s.mvp]);
- netSend(S)}
+ netSnapOut(S)}
 // events the host forwards so clients see/hear the same things
 const _explode=explode,_sfxAt=sfxAt,_killAdd=killAdd,_award=award;
 explode=function(pos,team,sc){if(NET.role=='host')netEv([['x',pos.x,pos.y,pos.z,team,sc||1]]);return _explode(pos,team,sc)};
@@ -1407,7 +1450,7 @@ function netClientUpd(dt){
 function netInputSend(dt){
  if(NET.role!=='client'||titleOn)return;NET.inT+=dt;
  const a=[(act('fwd')?1:0)-(act('back')?1:0),(act('left')?1:0)-(act('right')?1:0),(act('rollR')?1:0)-(act('rollL')?1:0),act('slide')?1:0,act('boost')?1:0,act('jump')?1:0],key=a.join(',');
- if(key!==NET.inKey||NET.inT>.25){NET.inKey=key;NET.inT=0;netSend({t:'in',i:a})}
+ if(key!==NET.inKey||NET.inT>(netDirect()?.05:.25)){NET.inKey=key;NET.inT=0;netInputOut({t:'in',i:a})}
 }
 
 requestAnimationFrame(loop);
