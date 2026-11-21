@@ -1177,7 +1177,7 @@ ballM.visible=false;gear.style.display='none';car.visible=false;
 let camD=4.9;const bcDir=V(0,0,-1),camLook=V(0,0,0);let maxaS=.38;const spd=document.getElementById('spd');let last=performance.now();
 function loop(now){requestAnimationFrame(loop);const dt=Math.min((now-last)/1000,.05);last=now;
  if(titleOn){envUpd(dt);titleStep(dt);audUpd(dt);ren.render(scene,cam);return}
- if(NET.role=='client'){netClientUpd(dt);netInputSend(dt)}
+ if(NET.role=='client'){netPredict(dt);netClientUpd(dt);netInputSend(dt)}
  else if((!menuOpen||NET.on)&&!matchEnd&&phase!=2){if(cdT>0)cdUpd(dt);else{if(goT>0)goUpd(dt);if(NET.on)netPreStep(dt);else botsAI(dt,phase==0);for(let i=0;i<3;i++){if(!(PH.dead>0))step2(dt/3);for(const o of bots)if(!(o.C.dead>0))carStep(o.C,o.I,dt/3);ballStep(dt/3);simT+=dt/3}carCars();demoTick(dt);padsUpdate(dt);snap();clockStep(dt);if(phase==1){goalT-=dt;if(goalT<=0)startReplay()}}}
  else if((!menuOpen||NET.on)&&!matchEnd)replayStep(dt);
  if(NET.role=='host')netHostSend(dt);
@@ -1238,7 +1238,25 @@ function loop(now){requestAnimationFrame(loop);const dt=Math.min((now-last)/1000
 const PQ=id=>document.getElementById(id),tmpV=V(0,0,0),tq=new T.Quaternion();
 const blueM=bodyM.clone();blueM.color.setHex(0x1e6cff);
 const NET={on:false,role:null,id:null,ws:null,code:null,host:null,plist:[],bots:{},len:120,map:0,snap:null,snapAt:0,applied:-1,seq:0,sendT:0,inKey:'',inT:0,screen:'choice',started:false};
+NET.rtt=0;NET.pgI=0;
 const LENS=[120,180,300];
+// ---- lag hiding: client-side prediction of your own car, reconciled against the host's authoritative state ----
+function netPredict(dt){
+ if(!NET.snap||cdT>0||phase==2||matchEnd||PH.dead>0)return;
+ for(let i=0;i<3;i++)step2(dt/3);
+}
+function netRecon(e,age,dt,wasDead){
+ // the host's state is old by: time since it arrived + our ping + the host's ping, so extrapolate it forward by that much
+ const lead=Math.min(.5,age+NET.rtt+(NET.snap.rh||0));
+ tmpV.set(e[1]+e[8]*lead,e[2]+e[9]*lead,e[3]+e[10]*lead);tq.set(e[4],e[5],e[6],e[7]);
+ const hard=wasDead||PH.dead>0||cdT>0||phase==2||matchEnd||p.distanceToSquared(tmpV)>64;
+ if(hard){p.copy(tmpV);q.copy(tq);v.set(e[8],e[9],e[10]);w.set(0,0,0);dodgeW.set(0,0,0);jumpT=0;dodgeT=0;ceilT=0;restT=0;airT=0;jcool=0;dodged=false;selfFlip=false;isBoost=!!(e[11]&1);isAir=!!(e[11]&2);boost=e[12]}
+ else{
+  const kp=1-Math.exp(-6*dt);p.lerp(tmpV,kp);
+  if(q.angleTo(tq)>.9)q.slerp(tq,1-Math.exp(-1.5*dt));
+  boost+=(e[12]-boost)*(1-Math.exp(-10*dt));
+ }
+}
 function netSend(o){if(NET.ws&&NET.ws.readyState==1)NET.ws.send(JSON.stringify(o))}
 function netEv(e,to){if(NET.role=='host')netSend({t:'ev',e:e,to:to})}
 function privMsg(s){PQ('pMsg').textContent=s||''}
@@ -1251,10 +1269,10 @@ function netConnect(then){
  if(NET.ws&&NET.ws.readyState==1){then();return}
  let ws;try{ws=new WebSocket((location.protocol=='https:'?'wss://':'ws://')+location.host+'/ws')}catch(e){privMsg('Could not connect to the server.');return}
  NET.ws=ws;privMsg('Connecting…');
- ws.onopen=()=>{privMsg('');then()};
+ ws.onopen=()=>{privMsg('');clearInterval(NET.pgI);const pg=()=>netSend({t:'pg',c:performance.now()});pg();NET.pgI=setInterval(pg,500);then()};
  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(x){return}netMsg(m)};
  ws.onerror=()=>{};
- ws.onclose=()=>{if(NET.ws===ws){NET.ws=null;netLost()}};
+ ws.onclose=()=>{clearInterval(NET.pgI);if(NET.ws===ws){NET.ws=null;netLost()}};
 }
 function netLost(msg){
  if(NET.started){PQ('netLostTxt').textContent=msg||'DISCONNECTED FROM MATCH';PQ('netLost').style.display='flex'}
@@ -1280,6 +1298,7 @@ function netMsg(m){switch(m.t){
   if(mapI!=m.map)applyMap(m.map);
   if(NET.started)netPrune();else{if(NET.screen!='lobby')privScreen('lobby');privRender()}
   break;
+ case 'pg':{const r=(performance.now()-m.c)/1000;NET.rtt=NET.rtt?NET.rtt*.7+r*.3:r;break}
  case 'err':privMsg(m.msg);break;
  case 'start':if(!NET.started)netStart(m);break;
  case 'in':if(NET.role=='host')netIn(m);break;
@@ -1332,11 +1351,11 @@ function netIn(m){const o=NET.bots[m.id];if(!o||!Array.isArray(m.i))return;const
  I.thr=cn1(a[0]);I.st=cn1(a[1]);I.roll=cn1(a[2]);I.sl=a[3]?1:0;I.bo=a[4]?1:0;I.jr=a[5]?1:0;if(I.jr)o.jh=.05}
 function netPreStep(dt){for(const o of bots){o.jh-=dt;o.I.jump=(o.I.jr||o.jh>0)?1:0}}
 function netHostSend(dt){
- NET.sendT+=dt;if(NET.sendT<1/30)return;NET.sendT=0;
+ NET.sendT+=dt;if(NET.sendT<.0155)return;NET.sendT=0;
  const r=(x,k)=>Math.round(x*k)/k,P=(id,pp,qq,vv,fl,bo,dd)=>[id,r(pp.x,100),r(pp.y,100),r(pp.z,100),r(qq.x,1e4),r(qq.y,1e4),r(qq.z,1e4),r(qq.w,1e4),r(vv.x,10),r(vv.y,10),r(vv.z,10),fl,Math.round(bo),dd>0?r(dd,10):0];
  const pl=[P(NET.id,p,q,v,(isBoost?1:0)|(isAir?2:0),boost,PH.dead)];
  for(const o of bots){const C=o.C;pl.push(P(o.id,C.p,C.q,C.v,(C.isBoost?1:0)|(C.isAir?2:0),C.boost,C.dead))}
- const S={t:'snap',n:++NET.seq,pl:pl,b:[r(b.x,100),r(b.y,100),r(b.z,100),r(bv.x,10),r(bv.y,10),r(bv.z,10),r(bq.x,1e4),r(bq.y,1e4),r(bq.z,1e4),r(bq.w,1e4)],bv:ballM.visible?1:0,sc:[score[0],score[1]],mt:r(mTime,10),ot:ot?1:0,oo:r(otT,10),ph:phase,gT:r(goalT,100),gt:goalTeam,cd:r(cdT,100),me:matchEnd?1:0,pd:pads.map(a=>a.t>0?0:1).join('')};
+ const S={t:'snap',n:++NET.seq,rh:Math.round(NET.rtt*1000)/1000,pl:pl,b:[r(b.x,100),r(b.y,100),r(b.z,100),r(bv.x,10),r(bv.y,10),r(bv.z,10),r(bq.x,1e4),r(bq.y,1e4),r(bq.z,1e4),r(bq.w,1e4)],bv:ballM.visible?1:0,sc:[score[0],score[1]],mt:r(mTime,10),ot:ot?1:0,oo:r(otT,10),ph:phase,gT:r(goalT,100),gt:goalTeam,cd:r(cdT,100),me:matchEnd?1:0,pd:pads.map(a=>a.t>0?0:1).join('')};
  if(goalInfo)S.gi=[goalInfo.team,goalInfo.st?goalInfo.st.nid:null,goalInfo.as?goalInfo.as.nid:null];
  if(NET.seq%12==0||(matchEnd&&NET.seq%6==0))S.ss=allSt().map(s=>[s.nid,s.score,s.goals,s.assists,s.saves,s.shots,s.demos,s.mvp]);
  netSend(S)}
@@ -1378,7 +1397,7 @@ function netClientUpd(dt){
  if(b.distanceToSquared(tmpV)>64)b.copy(tmpV);else b.lerp(tmpV,k);
  bv.set(B[3],B[4],B[5]);tq.set(B[6],B[7],B[8],B[9]);bq.slerp(tq,k);ballM.visible=!!S.bv;
  for(const e of S.pl){
-  if(e[0]===NET.id){netLerp(p,q,v,e,age,k);isBoost=!!(e[11]&1);isAir=!!(e[11]&2);airT=isAir?1:0;restT=0;boost=e[12];const was=PH.dead>0;PH.dead=e[13];if(was&&!(PH.dead>0))camSnap=true}
+  if(e[0]===NET.id){const was=PH.dead>0;PH.dead=e[13];netRecon(e,age,dt,was);if(was&&!(PH.dead>0))camSnap=true}
   else{const o=NET.bots[e[0]];if(!o)continue;const C=o.C;netLerp(C.p,C.q,C.v,e,age,k);C.isBoost=!!(e[11]&1);C.isAir=!!(e[11]&2);C.dead=e[13];C.boost=e[12]}
  }
  for(const a of pads)if(a.t<=0){a.core.rotation.y+=dt*2;a.core.position.y=a.cy+Math.sin(simT*3+a.x)*.08}
