@@ -147,11 +147,18 @@ wss.on('connection', ws => {
         if (h) send(h.ws, { t: 'in', id: ws.pid, i: m.i.slice(0, 6) });
         break;
       }
+      case 'sig': { // WebRTC introductions: forward to one player in the same room
+        if (!room || !m.d) return;
+        const tgt = room.players.get(m.to);
+        if (tgt) send(tgt.ws, { t: 'sig', from: ws.pid, d: m.d });
+        break;
+      }
       case 'pg': send(ws, { t: 'pg', c: m.c }); break; // ping echo (clients use it to measure latency)
       case 'snap': { // host -> everyone else: world state, relayed as-is (no re-encoding)
         if (!room || room.host !== ws.pid) return;
         for (const p of room.players.values()) {
           if (p.id === ws.pid || p.ws.readyState !== 1) continue;
+          if (Array.isArray(m.o) && !m.o.includes(p.id)) continue; // already got it over a direct link
           if (p.ws.bufferedAmount > 32768) continue; // slow client: drop stale snapshots instead of queueing lag
           p.ws.send(raw, { binary: false });
         }
@@ -163,6 +170,7 @@ wss.on('connection', ws => {
         for (const p of room.players.values()) {
           if (p.id === ws.pid) continue;
           if (m.to && p.id !== m.to) continue;
+          if (Array.isArray(m.o) && !m.o.includes(p.id)) continue;
           if (p.ws.readyState === 1) p.ws.send(data);
         }
         break;
