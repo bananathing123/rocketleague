@@ -77,7 +77,7 @@ function leave(ws) {
   }
 }
 
-const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024, perMessageDeflate: false });
 
 wss.on('connection', ws => {
   ws.pid = nextId++;
@@ -147,7 +147,16 @@ wss.on('connection', ws => {
         if (h) send(h.ws, { t: 'in', id: ws.pid, i: m.i.slice(0, 6) });
         break;
       }
-      case 'snap': // host -> everyone else: world state
+      case 'pg': send(ws, { t: 'pg', c: m.c }); break; // ping echo (clients use it to measure latency)
+      case 'snap': { // host -> everyone else: world state, relayed as-is (no re-encoding)
+        if (!room || room.host !== ws.pid) return;
+        for (const p of room.players.values()) {
+          if (p.id === ws.pid || p.ws.readyState !== 1) continue;
+          if (p.ws.bufferedAmount > 32768) continue; // slow client: drop stale snapshots instead of queueing lag
+          p.ws.send(raw, { binary: false });
+        }
+        break;
+      }
       case 'ev': { // host -> everyone else (or one player via m.to): one-off events
         if (!room || room.host !== ws.pid) return;
         const data = JSON.stringify(m);
