@@ -128,11 +128,11 @@ function carCars(){const A=[];for(const o of bots)if(!(o.C.dead>0))A.push({p:o.C
  const kills=[];const isSS=(e,sp)=>(e.H.ss=e.H.ss?sp>=SS_OFF:sp>=SS_ON)&&!e.H.isAir;   // same rule as the trail: on at 22, off below 21
  
  for(let i=0;i<A.length;i++)for(let j=i+1;j<A.length;j++){const a=A[i],c=A[j],dx=c.p.x-a.p.x,dy=c.p.y-a.p.y,dz=c.p.z-a.p.z,d=Math.hypot(dx,dy,dz);
-  if(d<1.35&&d>1e-4){const nx=dx/d,ny=dy/d,nz=dz/d;
+  if(d<1.5&&d>1e-4){const nx=dx/d,ny=dy/d,nz=dz/d;
    if(a.t!=c.t){const sa=a.v.length(),sc=c.v.length(),aa=isSS(a,sa)&&(a.v.x*nx+a.v.y*ny+a.v.z*nz)>sa*.45,cc=isSS(c,sc)&&-(c.v.x*nx+c.v.y*ny+c.v.z*nz)>sc*.45;
     if(aa)kills.push([c,a]);if(cc)kills.push([a,c]);if(aa||cc)continue}
-   const pen=(1.35-d)/2;a.p.x-=nx*pen;a.p.y-=ny*pen;a.p.z-=nz*pen;c.p.x+=nx*pen;c.p.y+=ny*pen;c.p.z+=nz*pen;
-   const rel=(c.v.x-a.v.x)*nx+(c.v.y-a.v.y)*ny+(c.v.z-a.v.z)*nz;if(rel<0){if(rel<-3){const nw=performance.now();if(nw-lastBump>120){lastBump=nw;sfxAt('bump',a.p,Math.min(1,-rel/15))}}const j2=-(1.35)*rel/2;a.v.x-=nx*j2;a.v.y-=ny*j2;a.v.z-=nz*j2;c.v.x+=nx*j2;c.v.y+=ny*j2;c.v.z+=nz*j2}}}
+   const pen=(1.5-d)/2;a.p.x-=nx*pen;a.p.y-=ny*pen;a.p.z-=nz*pen;c.p.x+=nx*pen;c.p.y+=ny*pen;c.p.z+=nz*pen;
+   const rel=(c.v.x-a.v.x)*nx+(c.v.y-a.v.y)*ny+(c.v.z-a.v.z)*nz;if(rel<0){if(rel<-3){const nw=performance.now();if(nw-lastBump>120){lastBump=nw;sfxAt('bump',a.p,Math.min(1,-rel/15))}}const j2=-(1.5)*rel/2;a.v.x-=nx*j2;a.v.y-=ny*j2;a.v.z-=nz*j2;c.v.x+=nx*j2;c.v.y+=ny*j2;c.v.z+=nz*j2}}}
  for(const[vic,att]of kills)if(!(vic.H.dead>0))demoCar(vic,att)}
 // ---------- demolitions ----------
 const DS=[[-32,-44],[-24,-45],[-16,-45],[16,-45],[24,-45],[32,-44]];
@@ -328,8 +328,8 @@ function tick(dt){
    if(goT>0)goT-=dt;
    for(const o of bots){if(!o.pl)continue;o.jh-=dt;o.I.jump=(o.I.jr||o.jh>0)?1:0}   // humans: keep a jump press alive for one physics tick even if the packet was short
    botsAI(dt,phase==0);
-   for(let i=0;i<3;i++){for(const o of bots)if(!(o.C.dead>0))carStep(o.C,o.I,dt/3);ballStep(dt/3);simT+=dt/3}
-   carCars();demoTick(dt);padsUpdate(dt);snapH();clockStep(dt);
+   for(let i=0;i<3;i++){for(const o of bots)if(!(o.C.dead>0))carStep(o.C,o.I,dt/3);ballStep(dt/3);carCars();simT+=dt/3}
+   demoTick(dt);padsUpdate(dt);snapH();clockStep(dt);
    if(phase==1){goalT-=dt;if(goalT<=0)startReplay()}}}
  else if(!matchEnd)replayStep(dt)}
 function snapshot(){
