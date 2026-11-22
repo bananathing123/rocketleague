@@ -202,6 +202,8 @@ body.tm #hud,body.tm #score{visibility:hidden}
 .pp span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pp button{pointer-events:auto;background:#1a6fc0;color:#fff;border:0;padding:5px 12px;font:italic 700 14px 'Exo 2',system-ui,sans-serif;cursor:pointer;white-space:nowrap}
 .pp button:hover{background:#5fc0ff;color:#001a33}
+.pp{padding:4px 12px}.ptm>div{min-height:0}.pp.bot{border-left-color:#8c98a8}.pbs{display:flex;gap:6px;flex:none}.pp button.xb{background:#8a2a2a;padding:5px 10px}.pp button.xb:hover{background:#ff6a6a;color:#2a0000}
+.addbot{pointer-events:auto;background:#0b2a50;color:#9fd0ff;border:1px dashed #3d78b8;padding:6px 12px;font:italic 700 14px 'Exo 2',system-ui,sans-serif;cursor:pointer}.addbot:hover{background:#1a6fc0;color:#fff}
 #pBack{pointer-events:none;position:absolute;left:3vw;bottom:5vh;font:italic 600 clamp(15px,1.5vw,20px)/1 'Exo 2','Arial Black',system-ui,sans-serif;letter-spacing:.08em;color:#fff;background:#000;border:0;border-bottom:2px solid #2a8cff;padding:18px 70px;cursor:pointer;clip-path:polygon(0 0,100% 0,calc(100% - 14px) 100%,0 100%);transition:background .15s,color .15s}
 #title.vm #pBack{pointer-events:auto}
 #pBack:hover{background:#fff;color:#06122a}
@@ -405,6 +407,7 @@ body.vic #hud,body.vic #tabsb,body.vic #pfeed,body.vic #dfeed,body.vic #bcWm,bod
 <div class="pscr" id="pLobby"><div id="pLeft"><span class="plab">MATCH CODE &mdash; SHARE IT WITH FRIENDS</span><b id="pCodeShow"></b>
 <div class="prow"><span>ARENA</span><div class="osel"><button class="pa" data-k="map" data-d="-1">&#10094;</button><b id="pvMap"></b><button class="pa" data-k="map" data-d="1">&#10095;</button></div></div>
 <div class="prow"><span>LENGTH</span><div class="osel"><button class="pa" data-k="len" data-d="-1">&#10094;</button><b id="pvLen"></b><button class="pa" data-k="len" data-d="1">&#10095;</button></div></div>
+<div class="prow"><span>BOT SKILL</span><div class="osel"><button class="pa" data-k="diff" data-d="-1">&#10094;</button><b id="pvDiff"></b><button class="pa" data-k="diff" data-d="1">&#10095;</button></div></div>
 <button class="pbtn grn" id="pStart">START MATCH</button><span id="pWait">Waiting for the host to start the match&hellip;</span><span id="pCount"></span></div>
 <div id="pTeams"><div class="ptm t0"><h3>BLUE TEAM</h3><div id="pT0"></div></div><div class="ptm t1"><h3>ORANGE TEAM</h3><div id="pT1"></div></div></div></div>
 <div id="pMsg"></div><button id="pBack">BACK</button></div>
@@ -1140,7 +1143,8 @@ function clockStep(dt){if(!matchOn||phase!=0||cdT>0||matchEnd)return;
  if(mTime<=0){tUp+=dt;if(b.y<BR+.25||tUp>7){if(score[0]!=score[1])endMatch();else{ot=true;otT=0;sfx('whistle');resetAll()}}}}
 const endEl=document.createElement('div');endEl.id='endm';endEl.innerHTML='<h1 id="eT"></h1><div class="fs" id="eS"></div><div id="rsTop"></div><div id="rsMain"></div><div id="rsLow"><div id="rsMenu"><button id="eR">PLAY AGAIN</button><button id="eM">QUIT TO TITLE</button></div><div id="rsBot"></div></div>';document.body.appendChild(endEl);
 function endMatch(){matchEnd=true;phase=0;sfx('buzzer');const wt=score[0]>score[1]?0:1,w=wt==MT;setTimeout(()=>sfx(w?'victory':'defeat'),700);{let best=null;for(const x of allSt())if(x.t==wt&&(!best||x.score>best.score))best=x;if(best){best.score+=50;best.mvp=1}}const h=document.getElementById('eT');h.textContent=w?'VICTORY':'DEFEAT';h.style.color=w?'#7ad0ff':'#ff9a3a';document.getElementById('eS').textContent=score[0]+' – '+score[1]+(ot?'  (OT)':'');qEnd(w);vicStart(wt,w)}
-function rematch(){if(qMatch)return;if(NET.on&&NET.role!='host')return;vicStop();endEl.classList.remove('on');matchEnd=false;score[0]=score[1]=0;mTime=NET.on?NET.len:120;ot=false;otT=0;tUp=0;if(NET.on)netMkBots();else mkBots();resetAll();if(NET.on)netEv([['rm']])}
+function rematch(){if(qMatch)return;if(NET.on){if(NET.id===NET.host)netSend({t:'rematch'});return}   // online: the lobby leader asks the server to restart the match
+ vicStop();endEl.classList.remove('on');matchEnd=false;score[0]=score[1]=0;mTime=NET.on?NET.len:120;ot=false;otT=0;tUp=0;if(NET.on)netMkBots();else mkBots();resetAll();if(NET.on)netEv([['rm']])}
 document.getElementById('eR').onclick=()=>{if(qMatch){try{sessionStorage.setItem('rl_skip','1');sessionStorage.setItem('rl_find',qMatch.ranked?'comp':'cas')}catch(e){}location.reload()}else rematch()};document.getElementById('eM').onclick=()=>{try{sessionStorage.setItem('rl_skip','1');sessionStorage.setItem('rl_title','1')}catch(e){}location.reload()};
 // setup screen
 function oRender(){const M=MAPS[mapI];document.getElementById('vArena').textContent=M.n;document.getElementById('vSize').textContent=SZ[mSize-1];document.getElementById('vDiff').textContent=DIFF[mDiff].n;document.querySelectorAll('[data-r]').forEach(e=>e.classList.toggle('hot',+e.dataset.r==oR));
@@ -1287,13 +1291,14 @@ function step2(dt){
  sl=act('slide'),bo=act('boost')&&boost>0,jump=act('jump'),jp=jump&&!jprev;jprev=jump;isBoost=bo;jcool-=dt;
  const upn=up.dot(n);
  // wheels only count as "on the ground" when they actually face the surface (no more auto-righting)
- let ground=d<.45&&jcool<=0&&dodgeT<=0&&upn>.6&&(n.y>.6||thr!==0||bo);
+ const nd0=needD(n,up);   // how far the hitbox reaches toward this surface
+ let ground=d<Math.max(.45,nd0+.07)&&jcool<=0&&dodgeT<=0&&upn>.6&&v.dot(n)<2&&(n.y>.6||thr!==0||bo);   // a tilted car whose nose/corner touches the floor still counts as grounded -> it snaps flat instead of balancing on the corner
  if(ground&&n.y<-.3&&(v.length()<4||ceilT>.9))ground=false;
  if(ground&&jp){v.addScaledVector(up,3);jumpT=.2;jcool=.1;hasJump=true;airT=0;ground=false;sfx('jump')}isAir=!ground;
  const touching=!ground&&d<needD(n,up)+.1;
  if(ground){
   airT=0;hasJump=true;dodgeT=0;dodged=false;selfFlip=false;restT=0;w.set(0,0,0);if(n.y<-.3)ceilT+=dt;else if(n.y>-.1)ceilT=0;
-  const al=new T.Quaternion().setFromUnitVectors(up,n);q.premultiply(new T.Quaternion().slerp(al,1-Math.exp(-16*dt)));
+  const al=new T.Quaternion().setFromUnitVectors(up,n);q.premultiply(new T.Quaternion().slerp(al,1-Math.exp(-(nd0>d+.01&&nd0>.3?42:16)*dt)));
   up.set(0,1,0).applyQuaternion(q);fwd.set(0,0,-1).applyQuaternion(q);rt.set(1,0,0).applyQuaternion(q);
   const vf=v.dot(fwd),vl=v.dot(rt);let acc=0;
   if(thr>0)acc=vf<-.3?35:16*Math.max(0,1-vf/MAXV);else if(thr<0)acc=vf>.3?-35:-16*Math.max(0,1+vf/MAXV);else if(!bo)acc=-Math.sign(vf)*Math.min(5,Math.abs(vf)/dt);
@@ -1303,7 +1308,7 @@ function step2(dt){
   q.premultiply(new T.Quaternion().setFromAxisAngle(up,yaw*dt));
   if(v.length()>23)v.setLength(23);
   v.addScaledVector(n,-v.dot(n));p.addScaledVector(v,dt);
-  const d2=depth(p);normal(p,n2);p.addScaledVector(n2,RH-d2);
+  const d2=depth(p);normal(p,n2);p.addScaledVector(n2,Math.max(RH,needD(n2,up))-d2);
  }else{
   airT+=dt;
   // resting on a surface (roof / side / sitting on a wall) refills the jump & flip
@@ -1326,7 +1331,7 @@ function step2(dt){
     if(f<=0&&dodgeT<.46){dodgeT=0;w.set(0,0,0)}}
    rotW(dodgeW.clone().multiplyScalar(f),dt);if(selfFlip&&V(0,1,0).applyQuaternion(q).dot(n)>.98){dodgeT=0;dodged=false;selfFlip=false;w.set(0,0,0)}}
   else if(touching&&upn<.6){w.set(0,0,0)}   // lying on side / roof: air control is off, so no cartwheeling
-  else{const tg=rt.clone().multiplyScalar(-thr*5.5).addScaledVector(up,st*4.5).addScaledVector(fwd,roll*5.5);w.lerp(tg,1-Math.exp(-7*dt));rotW(w,dt)}   // flip over (dodgeT<=0): control comes back
+  else{const rl=sl?Math.max(-1,Math.min(1,roll-st)):roll,yw=sl?0:st,tg=rt.clone().multiplyScalar(-thr*5.5).addScaledVector(up,yw*4.5).addScaledVector(fwd,rl*5.5);w.lerp(tg,1-Math.exp(-7*dt));rotW(w,dt)}   // flip over (dodgeT<=0): control comes back
   if(bo)v.addScaledVector(fwd,9.92*dt);
   v.y-=6.5*dt;if(v.length()>23)v.setLength(23);p.addScaledVector(v,dt);
   // world contact: box support function, so the car lands / rests on whatever part touches first
@@ -1352,13 +1357,14 @@ function carStep(C,I,dt){const p=C.p,v=C.v,q=C.q,w=C.w,dodgeW=C.dodgeW;let{boost
  sl=I.sl,bo=I.bo&&boost>0,jump=I.jump,jp=jump&&!jprev;jprev=jump;isBoost=bo;jcool-=dt;
  const upn=up.dot(n);
  // wheels only count as "on the ground" when they actually face the surface (no more auto-righting)
- let ground=d<.45&&jcool<=0&&dodgeT<=0&&upn>.6&&(n.y>.6||thr!==0||bo);
+ const nd0=needDq(q,n,up);   // how far the hitbox reaches toward this surface
+ let ground=d<Math.max(.45,nd0+.07)&&jcool<=0&&dodgeT<=0&&upn>.6&&v.dot(n)<2&&(n.y>.6||thr!==0||bo);   // a tilted car whose nose/corner touches the floor still counts as grounded -> it snaps flat instead of balancing on the corner
  if(ground&&n.y<-.3&&(v.length()<4||ceilT>.9))ground=false;
  if(ground&&jp){v.addScaledVector(up,3);jumpT=.2;jcool=.1;hasJump=true;airT=0;ground=false}isAir=!ground;
  const touching=!ground&&d<needDq(q,n,up)+.1;
  if(ground){
   airT=0;hasJump=true;dodgeT=0;dodged=false;selfFlip=false;restT=0;w.set(0,0,0);if(n.y<-.3)ceilT+=dt;else if(n.y>-.1)ceilT=0;
-  const al=new T.Quaternion().setFromUnitVectors(up,n);q.premultiply(new T.Quaternion().slerp(al,1-Math.exp(-16*dt)));
+  const al=new T.Quaternion().setFromUnitVectors(up,n);q.premultiply(new T.Quaternion().slerp(al,1-Math.exp(-(nd0>d+.01&&nd0>.3?42:16)*dt)));
   up.set(0,1,0).applyQuaternion(q);fwd.set(0,0,-1).applyQuaternion(q);rt.set(1,0,0).applyQuaternion(q);
   const vf=v.dot(fwd),vl=v.dot(rt);let acc=0;
   if(thr>0)acc=vf<-.3?35:16*Math.max(0,1-vf/MAXV);else if(thr<0)acc=vf>.3?-35:-16*Math.max(0,1+vf/MAXV);else if(!bo)acc=-Math.sign(vf)*Math.min(5,Math.abs(vf)/dt);
@@ -1368,7 +1374,7 @@ function carStep(C,I,dt){const p=C.p,v=C.v,q=C.q,w=C.w,dodgeW=C.dodgeW;let{boost
   q.premultiply(new T.Quaternion().setFromAxisAngle(up,yaw*dt));
   if(v.length()>23)v.setLength(23);
   v.addScaledVector(n,-v.dot(n));p.addScaledVector(v,dt);
-  const d2=depth(p);normal(p,n2);p.addScaledVector(n2,RH-d2);
+  const d2=depth(p);normal(p,n2);p.addScaledVector(n2,Math.max(RH,needDq(q,n2,up))-d2);
  }else{
   airT+=dt;
   // resting on a surface (roof / side / sitting on a wall) refills the jump & flip
@@ -1391,7 +1397,7 @@ function carStep(C,I,dt){const p=C.p,v=C.v,q=C.q,w=C.w,dodgeW=C.dodgeW;let{boost
     if(f<=0&&dodgeT<.46){dodgeT=0;w.set(0,0,0)}}
    rotWq(q,dodgeW.clone().multiplyScalar(f),dt);if(selfFlip&&V(0,1,0).applyQuaternion(q).dot(n)>.98){dodgeT=0;dodged=false;selfFlip=false;w.set(0,0,0)}}
   else if(touching&&upn<.6){w.set(0,0,0)}   // lying on side / roof: air control is off, so no cartwheeling
-  else{const tg=rt.clone().multiplyScalar(-thr*5.5).addScaledVector(up,st*4.5).addScaledVector(fwd,roll*5.5);w.lerp(tg,1-Math.exp(-7*dt));rotWq(q,w,dt)}   // flip over (dodgeT<=0): control comes back
+  else{const rl=sl?Math.max(-1,Math.min(1,roll-st)):roll,yw=sl?0:st,tg=rt.clone().multiplyScalar(-thr*5.5).addScaledVector(up,yw*4.5).addScaledVector(fwd,rl*5.5);w.lerp(tg,1-Math.exp(-7*dt));rotWq(q,w,dt)}   // flip over (dodgeT<=0): control comes back
   if(bo)v.addScaledVector(fwd,9.92*dt);
   v.y-=6.5*dt;if(v.length()>23)v.setLength(23);p.addScaledVector(v,dt);
   // world contact: box support function, so the car lands / rests on whatever part touches first
@@ -1595,6 +1601,11 @@ function netSnapOut(S){
  if(need.length){S.o=need;netSend(S)}}
 function netInputOut(o){const pe=NET.peers[NET.host];if(pe&&chOpen(pe.dc)){try{pe.dc.send(JSON.stringify(o));return}catch(e){}}netSend(o)}
 const LENS=[120,180,300];
+function netRbUpd(){const rb=PQ('eR');if(!NET.on||qMatch)return;const lead=NET.id===NET.host;rb.textContent=lead?'PLAY AGAIN':'WAITING FOR LEADER';rb.style.opacity=lead?'':.5;rb.style.pointerEvents=lead?'':'none'}
+// goal-explosion / demolition effects the server tells us about
+function demoFx(x,y,z,team,ax,ay,az){const cols=team?[[1,.5,.1],[1,.85,.4],[1,1,1]]:[[.2,.5,1],[.6,.85,1],[1,1,1]];
+ for(let i=0;i<200;i++){const u=Math.random()*2-1,a=Math.random()*6.2832,r=Math.sqrt(1-u*u),sp=3+Math.random()*12,c=cols[i%3];
+  dem.spawn(x,y+.25,z,r*Math.cos(a)*sp+ax*.3,u*sp*.8+2+ay*.3,r*Math.sin(a)*sp+az*.3,.7+Math.random()*.8,c[0],c[1],c[2])}}
 // ---- lag hiding: client-side prediction of your own car, reconciled against the host's authoritative state ----
 function netPredict(dt){
  if(!NET.snap||cdT>0||phase==2||matchEnd||PH.dead>0)return;
@@ -1604,7 +1615,7 @@ function netRecon(e,age,dt,wasDead){
  // the host's state is old by: time since it arrived + our ping + the host's ping, so extrapolate it forward by that much
  const lead=Math.min(.5,age+(netDirect()?NET.drtt:NET.rtt+(NET.snap.rh||0)));
  tmpV.set(e[1]+e[8]*lead,e[2]+e[9]*lead,e[3]+e[10]*lead);tq.set(e[4],e[5],e[6],e[7]);
- const hard=wasDead||PH.dead>0||cdT>0||phase==2||matchEnd||p.distanceToSquared(tmpV)>64;
+ const hard=wasDead||PH.dead>0||cdT>0||phase==2||matchEnd||NET.hardT>0||p.distanceToSquared(tmpV)>64;   // hardT: just after a goal the server has thrown every car away from the goal, so snap to its state
  if(hard){p.copy(tmpV);q.copy(tq);v.set(e[8],e[9],e[10]);w.set(0,0,0);dodgeW.set(0,0,0);jumpT=0;dodgeT=0;ceilT=0;restT=0;airT=0;jcool=0;dodged=false;selfFlip=false;isBoost=!!(e[11]&1);isAir=!!(e[11]&2);boost=e[12]}
  else{
   const kp=1-Math.exp(-6*dt);p.lerp(tmpV,kp);
@@ -1638,24 +1649,28 @@ function netLost(msg){
  else{qNetDown();privMsg(msg||'Connection to the server was lost. (If the server was asleep, try again in a few seconds.)');if(NET.screen=='lobby')privScreen('choice')}
 }
 function privRender(){
- const me=NET.id===NET.host;
+ const me=NET.id===NET.host,full=NET.plist.length>=8;
  PQ('pCodeShow').textContent=NET.code||'';
- PQ('pvMap').textContent=(MAPS[NET.map]||MAPS[0]).n;PQ('pvLen').textContent=(NET.len/60)+' MIN';
+ PQ('pvMap').textContent=(MAPS[NET.map]||MAPS[0]).n;PQ('pvLen').textContent=(NET.len/60)+' MIN';PQ('pvDiff').textContent=['ROOKIE','PRO','ALL-STAR'][NET.diff==null?1:NET.diff];
  document.querySelectorAll('#pLobby .pa').forEach(b=>b.style.visibility=me?'visible':'hidden');
  PQ('pStart').style.display=me?'flex':'none';PQ('pWait').style.display=me?'none':'block';
- PQ('pCount').textContent=NET.plist.length+' / 6 PLAYERS';
- for(const t of[0,1]){const box=PQ('pT'+t);box.textContent='';
-  for(const pl of NET.plist.filter(x=>x.team==t)){
-   const r=document.createElement('div');r.className='pp';const nm=document.createElement('span');
-   nm.textContent=pl.name+(pl.id===NET.host?'  ★ HOST':'')+(pl.id===NET.id?'  (YOU)':'');r.appendChild(nm);
-   if(me){const bt=document.createElement('button');bt.textContent=t?'❮ BLUE':'ORANGE ❯';bt.onclick=()=>{sfx('tick');netSend({t:'team',id:pl.id,team:1-t})};r.appendChild(bt)}
-   box.appendChild(r)}}
+ PQ('pCount').textContent=NET.plist.length+' / 8 PLAYERS';
+ for(const t of[0,1]){const box=PQ('pT'+t);box.textContent='';const mem=NET.plist.filter(x=>x.team==t);
+  for(const pl of mem){
+   const r=document.createElement('div');r.className='pp'+(pl.bot?' bot':'');const nm=document.createElement('span');
+   nm.textContent=pl.name+(pl.bot?'  \u2699 BOT':'')+(pl.id===NET.host?'  \u2605 LEADER':'')+(pl.id===NET.id?'  (YOU)':'');r.appendChild(nm);
+   if(me){const g=document.createElement('div');g.className='pbs';
+    const bt=document.createElement('button');bt.textContent=t?'\u276E BLUE':'ORANGE \u276F';bt.onclick=()=>{sfx('tick');netSend({t:'team',id:pl.id,team:1-t})};g.appendChild(bt);
+    if(pl.bot){const x=document.createElement('button');x.className='xb';x.textContent='\u2715';x.title='Remove bot';x.onclick=()=>{sfx('tick');netSend({t:'rmbot',id:pl.id})};g.appendChild(x)}
+    r.appendChild(g)}
+   box.appendChild(r)}
+  if(me&&mem.length<4&&!full){const ab=document.createElement('button');ab.className='addbot';ab.textContent='+ ADD BOT';ab.onclick=()=>{sfx('tick');netSend({t:'addbot',team:t})};box.appendChild(ab)}}
 }
 function netMsg(m){switch(m.t){
  case 'lobby':
-  NET.id=m.you;NET.code=m.code;NET.host=m.host;NET.plist=m.players;NET.len=m.len;NET.map=m.map;
+  NET.id=m.you;NET.code=m.code;NET.host=m.host;NET.plist=m.players;NET.len=m.len;NET.map=m.map;NET.diff=m.diff==null?1:m.diff;
   if(mapI!=m.map)applyMap(m.map);
-  if(NET.started)netPrune();else{if(NET.screen!='lobby')privScreen('lobby');privRender()}
+  if(NET.started){netPrune();netRbUpd()}else{if(NET.screen!='lobby')privScreen('lobby');privRender()}
   break;
  case 'chat':chatAdd(m.name,m.team,m.msg);break;
  case 'mmf':qMatched(m);break;
@@ -1680,26 +1695,28 @@ PQ('pGo').onclick=doJoin;
 PQ('pCode').oninput=e=>{e.target.value=e.target.value.toUpperCase().replace(/[^A-Z]/g,'')};
 PQ('pCode').onkeydown=e=>{e.stopPropagation();if(e.code=='Enter')doJoin();else if(e.code=='Escape'){e.preventDefault();privBack()}};
 PQ('pStart').onclick=()=>{if(NET.id===NET.host)netSend({t:'start'})};
-document.querySelectorAll('#pLobby .pa').forEach(b=>b.onclick=()=>{if(NET.id!==NET.host)return;sfx('tick');const d=+b.dataset.d;
- if(b.dataset.k=='map')netSend({t:'cfg',map:(NET.map+d+MAPS.length)%MAPS.length,len:NET.len});
- else netSend({t:'cfg',map:NET.map,len:LENS[(LENS.indexOf(NET.len)+d+LENS.length)%LENS.length]})});
+document.querySelectorAll('#pLobby .pa').forEach(b=>b.onclick=()=>{if(NET.id!==NET.host)return;sfx('tick');const d=+b.dataset.d,k=b.dataset.k,c={t:'cfg',map:NET.map,len:NET.len,diff:NET.diff==null?1:NET.diff};
+ if(k=='map')c.map=(NET.map+d+MAPS.length)%MAPS.length;
+ else if(k=='len')c.len=LENS[(LENS.indexOf(NET.len)+d+LENS.length)%LENS.length];
+ else c.diff=(c.diff+d+3)%3;
+ netSend(c)});
 PQ('pCodeShow').onclick=()=>{try{navigator.clipboard.writeText(NET.code||'');privMsg('Code copied!')}catch(e){}};
 // ---- starting a match ----
 function netStart(m){
- netCloseRtc();NET.started=true;NET.id=m.you;NET.host=m.host;NET.plist=m.players;NET.len=m.len;NET.role=NET.id===NET.host?'host':'client';NET.on=true;
+ netCloseRtc();NET.started=true;NET.id=m.you;NET.host=m.host;NET.plist=m.players;NET.len=m.len;NET.role='client';NET.on=true;
  const me=m.players.find(x=>x.id===NET.id);MT=me?me.team:0;PH.t=MT;
  if(mapI!=m.map)applyMap(m.map);
  if(MT==1)bodyM.color.setHex(0xff7a1a);
  plTag.className='ntag nt'+MT;
  freePlay=false;matchOn=true;score[0]=score[1]=0;mTime=NET.len;ot=false;otT=0;matchEnd=false;tUp=0;
  repEl.querySelector('small').textContent='';
- const rb=PQ('eR');if(NET.role!='host'&&!qMatch){rb.textContent='WAITING FOR HOST';rb.style.opacity=.5;rb.style.pointerEvents='none'}
+ netRbUpd();
  netMkBots();qNetStarted();beginPlay();netRtcStart();
 }
 const AIDEF=()=>({rt:0,tx:0,ty:0,tz:0,kx:0,ky:0,kz:0,act:null,at:0,fs:0,cd:0,stk:0,mode:'atk',aer:false,ta:0,fl:false,bo:false,mis:0,fr:0});
 function mkNetBot(pl){const t=pl.team,m=car.clone(true),fl=[];
  m.traverse(o=>{if(o.material===bodyM)o.material=t?orM:blueM;if(o.material&&o.material.blending===T.AdditiveBlending){fl.push(o);o.visible=false}});
- m.visible=true;scene.add(m);const C=mkS(0,0,0);C.t=t;const st=mkSt(pl.name,t,'PLAYER');st.nid=pl.id;C.st=st;
+ m.visible=true;scene.add(m);const C=mkS(0,0,0);C.t=t;const st=mkSt(pl.name,t,pl.bot?'BOT':'PLAYER');st.nid=pl.id;C.st=st;
  return{m,fl,t,C,st,idx:0,id:pl.id,name:pl.name,tag:mkTag(pl.name,t),net:true,jh:0,I:{thr:0,st:0,roll:0,sl:0,bo:0,jump:0,jr:0},ai:AIDEF()}}
 function netMkBots(){rmBots();resetStats();PST.nid=NET.id;PST.t=MT;NET.bots={};
  for(const pl of NET.plist){if(pl.id===NET.id)continue;const o=mkNetBot(pl);bots.push(o);NET.bots[pl.id]=o}}
@@ -1737,6 +1754,8 @@ function netEvs(L){if(!Array.isArray(L))return;for(const e of L){switch(e[0]){
  case 's':if(!titleOn)_sfxAt(e[1],V(e[2],e[3],e[4]),e[5]);break;
  case 'k':_killAdd({n:e[1],t:e[2]},{n:e[3],t:e[4]});break;
  case 'd':sfx('ding',Math.min(1,e[1]/100)*.6+.3);break;
+ case 'm':demoFx(e[1],e[2],e[3],e[4],e[5],e[6],e[7]);break;
+ case 't':if(!titleOn)sfx(e[1]);break;
  case 'rm':vicStop();endEl.classList.remove('on');matchEnd=false;ot=false;otT=0;tUp=0;camSnap=true;break;
 }}}
 function netDiscrete(S){
@@ -1744,7 +1763,7 @@ function netDiscrete(S){
  if(S.me&&!matchEnd)endMatch();else if(!S.me&&matchEnd){vicStop();endEl.classList.remove('on');matchEnd=false;ot=false;otT=0;tUp=0;camSnap=true}
  if(!matchEnd){
   mTime=S.mt;if(S.ot&&!ot)sfx('whistle');ot=!!S.ot;otT=S.oo;
-  if(S.ph===1&&phase!==1)sfx('goal');
+  if(S.ph===1&&phase!==1){sfx('goal');NET.hardT=.7}
   if(S.ph===2&&phase!==2){sfx('whoosh');camSnap=true}
   if(S.ph!==2&&phase===2)camSnap=true;
   phase=S.ph;goalT=S.gT;goalTeam=S.gt;if(S.cd>0)cdT=S.cd;
@@ -1756,6 +1775,7 @@ function netDiscrete(S){
 function netLerp(P,Q,V3,e,age,k){tmpV.set(e[1]+e[8]*age,e[2]+e[9]*age,e[3]+e[10]*age);if(P.distanceToSquared(tmpV)>25)P.copy(tmpV);else P.lerp(tmpV,k);tq.set(e[4],e[5],e[6],e[7]);Q.slerp(tq,k);V3.set(e[8],e[9],e[10])}
 function netClientUpd(dt){
  const S=NET.snap;if(!S)return;
+ NET.hardT=Math.max(0,(NET.hardT||0)-dt);
  const age=Math.min(.12,(performance.now()-NET.snapAt)/1000),k=1-Math.exp(-28*dt);
  if(S.n!==NET.applied){NET.applied=S.n;netDiscrete(S)}
  const B=S.b;tmpV.set(B[0]+B[3]*age,B[1]+B[4]*age,B[2]+B[5]*age);
@@ -1839,7 +1859,7 @@ let frCarsUpd=null;
  // ----- party members' cars on the title screen -----
  const pcG=new T.Group(),PC=new Map(),tagBox=document.createElement('div'),yAx=V(0,1,0),tmpQ=new T.Quaternion(),pv=V(0,0,0);
  tagBox.id='ptTags';tEl.appendChild(tagBox);scene.add(pcG);pcG.visible=false;
- const SLOTS=[[-2.6,1.4],[2.2,1.6],[-5.0,3.0],[4.4,3.4],[-7.4,4.6]]; // [sideways, backwards] from the hero car; sideways + = screen-right
+ const SLOTS=[[-2.6,1.4],[2.2,1.6],[-5.0,3.0],[4.4,3.4],[-7.4,4.6],[6.6,5.2],[-9.6,6.4]]; // [sideways, backwards] from the hero car; sideways + = screen-right
  function mkCar(cos){ // builds a car with someone else's cosmetics by borrowing the garage builder, then restores our own
   const sv=Object.assign({},cs);
   for(const k in SELD){const lo=(k=='decal'||k=='top')?-1:0,v=Number.isInteger(cos[k])?cos[k]:SELD[k];cs[k]=Math.max(lo,Math.min(4,v))}
@@ -1861,7 +1881,7 @@ let frCarsUpd=null;
   const W=innerWidth,H=innerHeight;
   for(const o of PC.values()){
    o.s+=(1-o.s)*(1-Math.exp(-6*dt));
-   const sl=SLOTS[Math.min(o.i,4)],s=sl[0],b=sl[1];
+   const sl=SLOTS[Math.min(o.i,6)],s=sl[0],b=sl[1];
    o.g.position.set(.8*s+.6*b,.22,-17+.6*s-.8*b);
    o.g.quaternion.copy(car.quaternion).premultiply(tmpQ.setFromAxisAngle(yAx,o.i%2?.14:-.1));
    o.g.scale.setScalar(Math.max(.01,o.s));
@@ -1909,7 +1929,7 @@ let frCarsUpd=null;
  function group(title,arr,off){if(!arr.length)return;const g=document.createElement('div');g.className='frG'+(off?' off':'');g.textContent=title;listEl.appendChild(g);arr.forEach(r=>listEl.appendChild(r))}
  function render(){
   meEl.textContent=uName;codeEl.textContent=FR.code;
-  const P=FR.party,lead=!!P&&P.leader===FR.code,inP=new Set(P?P.members.map(x=>x.code):[]),canInv=!P||(lead&&P.members.length<6);
+  const P=FR.party,lead=!!P&&P.leader===FR.code,inP=new Set(P?P.members.map(x=>x.code):[]),canInv=!P||(lead&&P.members.length<8);
   const pr=[],ig=[],on=[],pe=[],of=[];
   if(P)for(const m of P.members){const me=m.code===FR.code;
    pr.push(row({cls:'pt',name:me?uName+' (YOU)':m.name,av:m.code===P.leader?'\u2605':null,sub:m.st||'Main Menu',acts:(lead&&!me)?[xBtn('Remove from party',()=>{sfx('back');send({t:'pt_kick',code:m.code})})]:[]}))}
@@ -1920,7 +1940,7 @@ let frCarsUpd=null;
    if(!d.online)of.push(row({cls:'off',name:nm,sub:'Offline',acts:[rm]}));
    else{const acts=canInv?[invBtn(f.code),rm]:[rm],r=row({name:nm,sub:d.st||'Main Menu',acts});(inGame(d.st)?ig:on).push(r)}}
   listEl.textContent='';
-  group('PARTY ('+(P?P.members.length:0)+'/6)',pr);
+  group('PARTY ('+(P?P.members.length:0)+'/8)',pr);
   if(P){const lv=document.createElement('button');lv.className='frLeave';lv.textContent='LEAVE PARTY';lv.onclick=()=>{sfx('back');send({t:'pt_leave'})};listEl.appendChild(lv)}
   group('IN-GAME ('+ig.length+')',ig);group('ONLINE ('+on.length+')',on);group('PENDING ('+pe.length+')',pe,true);group('OFFLINE ('+of.length+')',of,true);
   if(!FR.friends.length){const e=document.createElement('div');e.id='frEmpty';e.textContent="No friends yet. Share your friend code above and type your friend's code below. You both need to add each other to see names, activity and to invite them to a party.";listEl.appendChild(e)}
