@@ -1,12 +1,15 @@
-// Rocket League online relay server.
-// Serves the game from /public and relays private-match traffic over WebSocket (/ws).
-// The match HOST's browser runs the physics; this server just manages rooms and forwards messages.
+// Rocket League online server.
+// Serves the game from /public and runs every online match over WebSocket (/ws).
+// THIS SERVER IS THE HOST: it runs the physics / bots / scoring for every match (see sim.js) and streams the world to the players.
+// Players only send their controls and render what the server sends (their own car is predicted locally so it still feels instant).
+// Private matches: up to 8 players (4 per team) and bots can be added to either team by the lobby leader.
 // It also does matchmaking for Casual / Competitive duels: players queue ('mm'), get paired by MMR
 // (the allowed gap widens the longer they wait), and are put into a private 1v1 room automatically.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
+const { makeSim } = require('./sim');
 
 const PORT = process.env.PORT || 3000;
 const PUB = path.join(__dirname, 'public');
@@ -33,7 +36,9 @@ const server = http.createServer((req, res) => {
 
 const WORDS = ['GOAL','BALL','BOLT','BOOM','CARS','DASH','DOME','DUNK','FAST','FIRE','FLIP','FLUX','GAME','GEAR','GLOW','HERO','JUMP','KICK','LAPS','LEAP','LION','LUCK','MAZE','MOON','NOVA','OPEN','PACE','PUCK','RACE','RAMP','RING','ROAD','ROCK','SAVE','SHOT','SIDE','SLAM','SNOW','SPIN','STAR','SURF','TEAM','TIDE','TURF','TURN','VOLT','WAVE','WILD','WIND','WING','ZONE','ZOOM','ACES','AXLE','BASH','BEAM','BLUE','CAGE','CHIP','COIN','CREW','DARE','DAWN','DUSK','EDGE','EPIC','FANG','FLAG','FOAM','FORM','GALE','GRIP','GUST','HAZE','HOOK','IRON','JADE','JAZZ','KING','LAVA','LEAD','LINK','LOOP','MARS','MINT','NEON','NEXT','ONYX','PEAK','PINE','PLAY','PUSH','QUAD','RAIN','RUSH','SAND','SKID','SOAR','SPAR','TANK','TRIM','TUBE','UNIT','VIBE','VOID','WARP','WOLF','YARD','ZEAL','ZINC'];
 
-const MAX_PLAYERS = 6, MAX_TEAM = 3;
+const MAX_PLAYERS = 8, MAX_TEAM = 4;   // humans + bots together
+const TICK_HZ = 60, SNAP_HZ = Math.max(20, Math.min(60, +process.env.SNAP_HZ || 60));   // physics rate / how often the world is sent to players
+const BOT_NAMES = ['Wisp','Nova','Hunter','Dash','Rex','Blaze','Tank','Echo','Viper','Dozer','Zap','Fuzz'];
 const rooms = new Map(); // code -> room
 // ---- matchmaking ----
 const MM_MAPS = 5, MM_LEN = 120, MM_COUNTDOWN_MS = 3300;
@@ -49,7 +54,7 @@ const frSocks = new Map(); // code -> Set(ws) of connected presence sockets
 const frTok = new Map();   // code -> secret token
 const parties = new Map(); // id -> { id, leader, members:[codes], invites:Map(code->expiry ms), room }
 const partyOf = new Map(); // code -> party id
-const PARTY_MAX = 6, INVITE_MS = 60000;
+const PARTY_MAX = 8, INVITE_MS = 60000;
 let frDirty = false;
 const CODE_RE = /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/;
 const normCode = s => { const t = String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); return t.length === 8 ? t.slice(0, 4) + '-' + t.slice(4) : ''; };
@@ -116,12 +121,23 @@ function genCode() {
 
 const cleanName = n => String(n || 'PLAYER').replace(/[<>&"'`\\]/g, '').trim().slice(0, 16) || 'PLAYER';
 const send = (ws, o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
-const teamCount = (room, t) => [...room.players.values()].filter(p => p.team === t).length;
+const botsOf = room => room.bots || (room.bots = []);
+const teamCount = (room, t) => [...room.players.values()].filter(p => p.team === t).length + botsOf(room).filter(p => p.team === t).length;
+const totalCount = room => room.players.size + botsOf(room).length;
+let nextBotId = 1;
+function freeBotName(room) {
+  const used = new Set([...botsOf(room).map(b => b.name), ...[...room.players.values()].map(p => p.name)]);
+  const start = Math.floor(Math.random() * BOT_NAMES.length);
+  for (let i = 0; i < BOT_NAMES.length; i++) { const n = BOT_NAMES[(start + i) % BOT_NAMES.length]; if (!used.has(n)) return n; }
+  return 'Bot' + botsOf(room).length;
+}
+const allPlayers = room => [...room.players.values()].map(p => ({ id: p.id, name: p.name, team: p.team }))
+  .concat(botsOf(room).map(b => ({ id: b.id, name: b.name, team: b.team, bot: 1 })));
 
 function lobbyFor(room, ws) {
   return {
-    t: 'lobby', code: room.code, host: room.host, you: ws.pid, map: room.map, len: room.len,
-    players: [...room.players.values()].map(p => ({ id: p.id, name: p.name, team: p.team }))
+    t: 'lobby', code: room.code, host: room.host, you: ws.pid, map: room.map, len: room.len, diff: room.diff == null ? 1 : room.diff,
+    players: allPlayers(room)
   };
 }
 function broadcastLobby(room) {
@@ -148,16 +164,67 @@ function sendQueueCounts() {
 }
 
 function startMsgs(room) {
-  const players = [...room.players.values()].map(p => ({ id: p.id, name: p.name, team: p.team }));
+  const players = allPlayers(room);
   for (const p of room.players.values())
     send(p.ws, { t: 'start', you: p.id, host: room.host, players, map: room.map, len: room.len });
+  startSim(room, players);
 }
+
+// ---- the server-side match: one sim per started room, stepped at a fixed rate and streamed to the players ----
+const simRooms = new Set();
+function startSim(room, players) {
+  stopSim(room);
+  room.sim = makeSim();
+  room.sim.start(players, { len: room.len, diff: room.diff == null ? 1 : room.diff });
+  room.simAcc = 0; room.simLast = process.hrtime.bigint(); room.snapT = 0;
+  simRooms.add(room);
+}
+function stopSim(room) { if (room.sim) { simRooms.delete(room); room.sim = null; } }
+function flushEvents(room) {
+  const list = room.sim.drainEv();
+  if (!list.length) return;
+  const all = list.filter(x => x.to == null).map(x => x.e);
+  if (all.length) {
+    const data = JSON.stringify({ t: 'ev', e: all });
+    for (const p of room.players.values()) if (p.ws.readyState === 1) p.ws.send(data);
+  }
+  for (const x of list) if (x.to != null) { const p = room.players.get(x.to); if (p) send(p.ws, { t: 'ev', e: [x.e] }); }
+}
+function simLoop() {
+  const now = process.hrtime.bigint();
+  for (const room of [...simRooms]) {
+    const sim = room.sim; if (!sim) continue;
+    room.simAcc += Number(now - room.simLast) / 1e9; room.simLast = now;
+    if (room.simAcc > .25) room.simAcc = .25;   // never try to catch up a huge stall
+    const dt = 1 / TICK_HZ;
+    while (room.simAcc >= dt) {
+      room.simAcc -= dt;
+      try { sim.tick(dt); } catch (e) {   // a bug in one match must never take the whole server down
+        console.error('sim error in room', room.code, e);
+        for (const p of room.players.values()) { send(p.ws, { t: 'closed' }); p.ws.room = null; }
+        rooms.delete(room.code); stopSim(room); break;
+      }
+      room.snapT += dt;
+      if (room.snapT >= 1 / SNAP_HZ - 1e-4) {
+        room.snapT = 0;
+        flushEvents(room);
+        const data = JSON.stringify(sim.snapshot());
+        for (const p of room.players.values()) {
+          if (p.ws.readyState !== 1) continue;
+          if (p.ws.bufferedAmount > 32768) continue;   // slow client: drop a stale snapshot instead of queueing lag
+          p.ws.send(data);
+        }
+      }
+    }
+  }
+}
+setInterval(simLoop, 1000 / TICK_HZ / 2);
 
 function makeMatch(a, b, kind) {
   const code = genCode();
   const r = {
     code, host: a.ws.pid, players: new Map(), map: Math.floor(Math.random() * MM_MAPS), len: MM_LEN,
-    started: true, mm: true, ranked: kind === 'comp', pending: true, over: false, entries: new Map(), timer: null
+    started: true, mm: true, ranked: kind === 'comp', pending: true, over: false, entries: new Map(), timer: null, bots: [], diff: 1
   };
   [a, b].forEach((e, team) => {
     r.players.set(e.ws.pid, { id: e.ws.pid, name: e.name, team, ws: e.ws });
@@ -208,6 +275,7 @@ function leave(ws) {
     const rest = [...room.players.values()];
     for (const p of rest) p.ws.room = null;
     rooms.delete(room.code);
+    stopSim(room);
     if (room.pending) {
       // someone left during the countdown: cancel the match and put the other player back in the queue
       if (room.timer) { clearTimeout(room.timer); room.timer = null; }
@@ -223,14 +291,14 @@ function leave(ws) {
     return;
   }
   room.players.delete(ws.pid);
-  if (room.host === ws.pid) {
-    for (const p of room.players.values()) { send(p.ws, { t: 'closed' }); p.ws.room = null; }
+  if (room.sim) room.sim.removeCar(ws.pid);
+  if (room.players.size === 0) {   // nobody left: the match is over, the server stops simulating it
+    stopSim(room);
     rooms.delete(room.code);
-  } else if (room.players.size === 0) {
-    rooms.delete(room.code);
-  } else {
-    broadcastLobby(room);
+    return;
   }
+  if (room.host === ws.pid) room.host = [...room.players.keys()][0];   // the match keeps running on the server; leadership moves to the next player
+  broadcastLobby(room);
 }
 
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024, perMessageDeflate: false });
@@ -251,7 +319,7 @@ wss.on('connection', (ws, req) => {
       case 'create': {
         if (room) leave(ws);
         const code = genCode();
-        const r = { code, host: ws.pid, players: new Map(), map: 0, len: 120, started: false };
+        const r = { code, host: ws.pid, players: new Map(), map: 0, len: 120, started: false, bots: [], diff: 1 };
         r.players.set(ws.pid, { id: ws.pid, name: cleanName(m.name), team: 0, ws });
         rooms.set(code, r);
         ws.room = r;
@@ -264,7 +332,8 @@ wss.on('connection', (ws, req) => {
         const r = rooms.get(code);
         if (!r) return send(ws, { t: 'err', msg: 'No match found with that code.' });
         if (r.started) return send(ws, { t: 'err', msg: 'That match has already started.' });
-        if (r.players.size >= MAX_PLAYERS) return send(ws, { t: 'err', msg: 'That match is full.' });
+        if (totalCount(r) >= MAX_PLAYERS && botsOf(r).length) botsOf(r).pop();   // a full lobby makes room for a real player by dropping the newest bot
+        if (totalCount(r) >= MAX_PLAYERS) return send(ws, { t: 'err', msg: 'That match is full.' });
         const team = teamCount(r, 0) <= teamCount(r, 1) ? 0 : 1;
         r.players.set(ws.pid, { id: ws.pid, name: cleanName(m.name), team, ws });
         ws.room = r;
@@ -273,10 +342,10 @@ wss.on('connection', (ws, req) => {
       }
       case 'team': {
         if (!room || room.mm || room.host !== ws.pid || room.started) return;
-        const p = room.players.get(m.id);
+        const p = room.players.get(m.id) || botsOf(room).find(b => b.id === m.id);
         const t = m.team === 1 ? 1 : 0;
         if (!p || p.team === t) return;
-        if (teamCount(room, t) >= MAX_TEAM) return send(ws, { t: 'err', msg: 'That team is full (3 max).' });
+        if (teamCount(room, t) >= MAX_TEAM) return send(ws, { t: 'err', msg: 'That team is full (4 max).' });
         p.team = t;
         broadcastLobby(room);
         break;
@@ -286,7 +355,28 @@ wss.on('connection', (ws, req) => {
         const map = Math.max(0, Math.min(9, m.map | 0));
         room.map = map;
         room.len = [120, 180, 300].includes(m.len) ? m.len : 120;
+        if (m.diff != null) room.diff = Math.max(0, Math.min(2, m.diff | 0));
         broadcastLobby(room);
+        break;
+      }
+      case 'addbot': { // lobby leader adds a bot to any team
+        if (!room || room.mm || room.host !== ws.pid || room.started) return;
+        const t = m.team === 1 ? 1 : 0;
+        if (totalCount(room) >= MAX_PLAYERS) return send(ws, { t: 'err', msg: 'The match is full (8 max).' });
+        if (teamCount(room, t) >= MAX_TEAM) return send(ws, { t: 'err', msg: 'That team is full (4 max).' });
+        botsOf(room).push({ id: -(nextBotId++), name: freeBotName(room), team: t });
+        broadcastLobby(room);
+        break;
+      }
+      case 'rmbot': {
+        if (!room || room.mm || room.host !== ws.pid || room.started) return;
+        const i = botsOf(room).findIndex(b => b.id === m.id);
+        if (i >= 0) { botsOf(room).splice(i, 1); broadcastLobby(room); }
+        break;
+      }
+      case 'rematch': { // the leader plays again on the same server-side match
+        if (!room || room.mm || room.host !== ws.pid || !room.sim || !room.sim.matchEnd) return;
+        room.sim.rematch();
         break;
       }
       case 'start': {
@@ -295,16 +385,9 @@ wss.on('connection', (ws, req) => {
         startMsgs(room);
         break;
       }
-      case 'in': { // client -> host: controls
-        if (!room || room.host === ws.pid || !Array.isArray(m.i)) return;
-        const h = room.players.get(room.host);
-        if (h) send(h.ws, { t: 'in', id: ws.pid, i: m.i.slice(0, 6) });
-        break;
-      }
-      case 'sig': { // WebRTC introductions: forward to one player in the same room
-        if (!room || !m.d) return;
-        const tgt = room.players.get(m.to);
-        if (tgt) send(tgt.ws, { t: 'sig', from: ws.pid, d: m.d });
+      case 'in': { // controls go straight into the server-side match
+        if (!room || !room.sim || !Array.isArray(m.i)) return;
+        room.sim.input(ws.pid, m.i.slice(0, 6));
         break;
       }
       case 'mm': { // join the matchmaking queue
@@ -353,7 +436,7 @@ wss.on('connection', (ws, req) => {
         let p = parties.get(partyOf.get(ws.code));
         if (p && p.leader !== ws.code) return send(ws, { t: 'pt_err', msg: 'Only the party leader can invite.' });
         if (p && p.members.includes(to)) return;
-        if (p && p.members.length >= PARTY_MAX) return send(ws, { t: 'pt_err', msg: 'Your party is full (6 max).' });
+        if (p && p.members.length >= PARTY_MAX) return send(ws, { t: 'pt_err', msg: 'Your party is full (8 max).' });
         if (partyOf.has(to)) return send(ws, { t: 'pt_err', msg: 'That player is already in a party.' });
         if (!p) { p = { id: 'P' + (nextId++), leader: ws.code, members: [ws.code], invites: new Map(), room: null }; parties.set(p.id, p); partyOf.set(ws.code, p.id); }
         p.invites.set(to, Date.now() + INVITE_MS);
@@ -398,27 +481,6 @@ wss.on('connection', (ws, req) => {
         break;
       }
       case 'pg': send(ws, { t: 'pg', c: m.c }); break; // ping echo (clients use it to measure latency)
-      case 'snap': { // host -> everyone else: world state, relayed as-is (no re-encoding)
-        if (!room || room.host !== ws.pid) return;
-        for (const p of room.players.values()) {
-          if (p.id === ws.pid || p.ws.readyState !== 1) continue;
-          if (Array.isArray(m.o) && !m.o.includes(p.id)) continue; // already got it over a direct link
-          if (p.ws.bufferedAmount > 32768) continue; // slow client: drop stale snapshots instead of queueing lag
-          p.ws.send(raw, { binary: false });
-        }
-        break;
-      }
-      case 'ev': { // host -> everyone else (or one player via m.to): one-off events
-        if (!room || room.host !== ws.pid) return;
-        const data = JSON.stringify(m);
-        for (const p of room.players.values()) {
-          if (p.id === ws.pid) continue;
-          if (m.to && p.id !== m.to) continue;
-          if (Array.isArray(m.o) && !m.o.includes(p.id)) continue;
-          if (p.ws.readyState === 1) p.ws.send(data);
-        }
-        break;
-      }
       case 'leave': leave(ws); break;
     }
   });
@@ -440,4 +502,4 @@ setInterval(() => {
   }
 }, 25000);
 
-server.listen(PORT, () => console.log('Rocket League server listening on ' + PORT));
+server.listen(PORT, () => console.log('Rocket League server (hosts every match itself) listening on ' + PORT));
